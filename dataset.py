@@ -1,15 +1,22 @@
 import pandas as pd
+import os
 
-# 📌 Carregar os arquivos necessários
-admissions_df = pd.read_csv("admissions.csv")
-patients_df = pd.read_csv("patients.csv")
-prescriptions_df = pd.read_csv("prescriptions.csv")
-procedureevents_df = pd.read_csv("procedureevents.csv")
-icustays_df = pd.read_csv("icustays.csv")
-diagnoses_df = pd.read_csv("diagnoses_icd.csv")
-icd_descriptions_df = pd.read_csv("d_icd_diagnoses.csv")
-labevents_df = pd.read_csv("labevents.csv")
-chartevents_df = pd.read_csv("chartevents.csv")
+# 📌 Definir a pasta onde os arquivos CSV estão armazenados
+pasta_dados = "dados_UTI"
+
+# 📌 Carregar os arquivos CSV da pasta
+arquivos = {arquivo.split('.')[0]: pd.read_csv(os.path.join(pasta_dados, arquivo)) for arquivo in os.listdir(pasta_dados) if arquivo.endswith(".csv")}
+
+# 📌 Atribuir os DataFrames às variáveis correspondentes
+admissions_df = arquivos.get("admissions")
+patients_df = arquivos.get("patients")
+prescriptions_df = arquivos.get("prescriptions")
+procedureevents_df = arquivos.get("procedureevents")
+icustays_df = arquivos.get("icustays")
+diagnoses_df = arquivos.get("diagnoses_icd")
+icd_descriptions_df = arquivos.get("d_icd_diagnoses")
+labevents_df = arquivos.get("labevents")
+chartevents_df = arquivos.get("chartevents")
 
 # 📌 Converter colunas de tempo para datetime
 admissions_df['admittime'] = pd.to_datetime(admissions_df['admittime'], errors='coerce')
