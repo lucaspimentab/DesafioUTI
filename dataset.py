@@ -1,7 +1,4 @@
-# 📌 IMPORTAÇÃO E PREPARO DOS DADOS
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import os
 
 # 📌 Definir a pasta onde os arquivos CSV estão armazenados
@@ -20,7 +17,6 @@ icustays_df = arquivos.get("icustays")
 diagnoses_df = arquivos.get("diagnoses_icd")
 icd_descriptions_df = arquivos.get("d_icd_diagnoses")
 labevents_df = arquivos.get("labevents")
-chartevents_df = arquivos.get("chartevents")
 
 # 📌 Converter colunas de tempo para datetime
 admissions_df['admittime'] = pd.to_datetime(admissions_df['admittime'], errors='coerce')
@@ -33,7 +29,7 @@ icustays_df['outtime'] = pd.to_datetime(icustays_df['outtime'], errors='coerce')
 icustays_df['icu_los'] = (icustays_df['outtime'] - icustays_df['intime']).dt.total_seconds() / (24 * 3600)
 
 # 📌 Base demográfica
-dataset_uti = patients_df[['subject_id', 'gender', 'anchor_age']]
+dataset_uti = patients_df[['subject_id', 'gender', 'anchor_age']].copy()
 
 # 📌 Variáveis clínicas
 num_admissoes_uti = icustays_df.groupby('subject_id')['stay_id'].nunique().reset_index(name='num_admissoes_uti')
@@ -44,8 +40,6 @@ num_diagnosticos = diagnoses_df.groupby('subject_id')['icd_code'].nunique().rese
 admissions_uti = admissions_df.merge(icustays_df[['subject_id', 'hadm_id', 'intime']], on=['subject_id', 'hadm_id'], how='left')
 admissions_uti['tempo_antes_uti'] = (admissions_uti['intime'] - admissions_uti['admittime']).dt.total_seconds() / (24 * 3600)
 tempo_antes_uti = admissions_uti[['subject_id', 'tempo_antes_uti']].drop_duplicates()
-
-# 📌 Preencher valores ausentes com mediana
 mediana_tempo = tempo_antes_uti['tempo_antes_uti'].median()
 tempo_antes_uti['tempo_antes_uti'] = tempo_antes_uti['tempo_antes_uti'].fillna(mediana_tempo)
 
@@ -80,7 +74,8 @@ pacientes_tsr['TSR'] = 1
 # 📌 Mortalidade
 mortalidade_intra_uti = icustays_df.merge(
     admissions_df[['subject_id', 'hadm_id', 'deathtime']],
-    on=['subject_id', 'hadm_id'], how='left'
+    on=['subject_id', 'hadm_id'],
+    how='left'
 )
 mortalidade_intra_uti = mortalidade_intra_uti[
     (mortalidade_intra_uti['deathtime'].notna()) &
@@ -90,35 +85,31 @@ mortalidade_intra_uti = mortalidade_intra_uti[
 
 mortalidade_hospitalar = admissions_df[
     (admissions_df['hospital_expire_flag'] == 1) &
-    (~admissions_df['subject_id'].isin(mortalidade_intra_uti['subject_id']))
+    (~admissions_df['subject_id'].isin(mortalidade_intra_uti['subject_id'])) &
+    (admissions_df['subject_id'].isin(icustays_df['subject_id']))
 ][['subject_id']].drop_duplicates()
 
 mortalidade_1_ano = admissions_df.merge(patients_df[['subject_id', 'dod']], on='subject_id', how='left')
 mortalidade_1_ano = mortalidade_1_ano[
+    (mortalidade_1_ano['hospital_expire_flag'] == 0) &  # saiu vivo do hospital
     (mortalidade_1_ano['dod'].notna()) &
     (mortalidade_1_ano['dischtime'].notna()) &
-    ((mortalidade_1_ano['dod'] - mortalidade_1_ano['dischtime']).dt.days <= 365)
+    ((mortalidade_1_ano['dod'] - mortalidade_1_ano['dischtime']).dt.days <= 365) &
+    (mortalidade_1_ano['subject_id'].isin(icustays_df['subject_id']))
 ][['subject_id']].drop_duplicates()
 
 # 📌 Adicionar flags de mortalidade
-dataset_uti['morte_na_uti'] = dataset_uti['subject_id'].isin(mortalidade_intra_uti['subject_id']).astype(int)
-dataset_uti['morte_hospitalar'] = dataset_uti['subject_id'].isin(mortalidade_hospitalar['subject_id']).astype(int)
-dataset_uti['morte_1ano'] = dataset_uti['subject_id'].isin(mortalidade_1_ano['subject_id']).astype(int)
+dataset_uti = dataset_uti.copy()
+dataset_uti.loc[:, 'morte_na_uti'] = dataset_uti['subject_id'].isin(mortalidade_intra_uti['subject_id']).astype(int)
+dataset_uti.loc[:, 'morte_hospitalar'] = dataset_uti['subject_id'].isin(mortalidade_hospitalar['subject_id']).astype(int)
+dataset_uti.loc[:, 'morte_1ano'] = dataset_uti['subject_id'].isin(mortalidade_1_ano['subject_id']).astype(int)
 
-# 📌 Criar status categórico
-def definir_status(row):
-    if row['morte_na_uti'] == 1:
-        return 'morte_uti'
-    elif row['morte_hospitalar'] == 1:
-        return 'morte_hospitalar'
-    elif row['morte_1ano'] == 1:
-        return 'morte_1ano'
-    else:
-        return 'vivo'
+# 📌 Criar coluna de mortalidade total
+dataset_uti['mortalidade_total'] = (
+    (dataset_uti['morte_na_uti'] + dataset_uti['morte_hospitalar'] + dataset_uti['morte_1ano']) > 0
+).astype(int)
 
-dataset_uti['status_morte'] = dataset_uti.apply(definir_status, axis=1)
-
-# 📌 Unir todas as variáveis
+# 📌 Unir variáveis
 dataset_uti = dataset_uti.merge(num_admissoes_uti, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(total_icu_los, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(num_diagnosticos, on='subject_id', how='left')
@@ -131,7 +122,7 @@ dataset_uti = dataset_uti.merge(pacientes_ventilacao, on='subject_id', how='left
 dataset_uti = dataset_uti.merge(pacientes_vasopressores, on='subject_id', how='left').fillna({'vasopressor': 0})
 dataset_uti = dataset_uti.merge(pacientes_tsr, on='subject_id', how='left').fillna({'TSR': 0})
 
-# 📌 Remover duplicatas e limitar a 100 pacientes
+# 📌 Remover duplicatas e manter 100 pacientes
 dataset_uti = dataset_uti.drop_duplicates(subset=['subject_id']).sort_values(by='subject_id').head(100)
 
 # 📌 Salvar
