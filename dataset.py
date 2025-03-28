@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import os
 
 # 📌 Definir a pasta onde os arquivos CSV estão armazenados
@@ -17,6 +18,7 @@ icustays_df = arquivos.get("icustays")
 diagnoses_df = arquivos.get("diagnoses_icd")
 icd_descriptions_df = arquivos.get("d_icd_diagnoses")
 labevents_df = arquivos.get("labevents")
+chartevents_df = arquivos.get("chartevents")
 
 # 📌 Converter colunas de tempo para datetime
 admissions_df['admittime'] = pd.to_datetime(admissions_df['admittime'], errors='coerce')
@@ -48,11 +50,6 @@ exames_variancia = labevents_df.groupby('subject_id')['valuenum'].var().reset_in
 exames_first_last = labevents_df.groupby('subject_id')['valuenum'].agg(['first', 'last']).reset_index()
 exames_first_last['dif_exames'] = exames_first_last['last'] - exames_first_last['first']
 exames_first_last = exames_first_last[['subject_id', 'dif_exames']]
-
-# 📌 Diagnósticos de alto risco
-cid_alto_risco = ['A419', 'J960', 'R6521']
-diagnosticos_alto_risco = diagnoses_df[diagnoses_df['icd_code'].isin(cid_alto_risco)]
-diagnosticos_alto_risco = diagnosticos_alto_risco.groupby('subject_id')['icd_code'].nunique().reset_index(name='num_diagnosticos_alto_risco')
 
 # 📌 Procedimentos
 num_procedimentos = procedureevents_df.groupby('subject_id')['ordercategoryname'].nunique().reset_index(name='num_procedimentos')
@@ -89,42 +86,93 @@ mortalidade_hospitalar = admissions_df[
     (admissions_df['subject_id'].isin(icustays_df['subject_id']))
 ][['subject_id']].drop_duplicates()
 
-mortalidade_1_ano = admissions_df.merge(patients_df[['subject_id', 'dod']], on='subject_id', how='left')
+# 📌 Mortalidade em até 1 ano
+ultima_admissao = admissions_df.sort_values(['subject_id', 'dischtime'], ascending=[True, False]).drop_duplicates(subset='subject_id', keep='first')
+ultima_uti = icustays_df.sort_values(['subject_id', 'outtime'], ascending=[True, False]).drop_duplicates(subset='subject_id', keep='first')
+
+mortalidade_1_ano = ultima_admissao.merge(
+    patients_df[['subject_id', 'dod']], on='subject_id', how='left'
+).merge(
+    ultima_uti[['subject_id', 'outtime']], on='subject_id', how='left'
+)
+
 mortalidade_1_ano = mortalidade_1_ano[
-    (mortalidade_1_ano['hospital_expire_flag'] == 0) &  # saiu vivo do hospital
+    (mortalidade_1_ano['hospital_expire_flag'] == 0) &
     (mortalidade_1_ano['dod'].notna()) &
     (mortalidade_1_ano['dischtime'].notna()) &
-    ((mortalidade_1_ano['dod'] - mortalidade_1_ano['dischtime']).dt.days <= 365) &
-    (mortalidade_1_ano['subject_id'].isin(icustays_df['subject_id']))
+    (mortalidade_1_ano['outtime'].notna()) &
+    (mortalidade_1_ano['dod'] > mortalidade_1_ano['outtime']) &
+    ((mortalidade_1_ano['dod'] - mortalidade_1_ano['dischtime']).dt.days <= 365)
 ][['subject_id']].drop_duplicates()
 
-# 📌 Adicionar flags de mortalidade
-dataset_uti = dataset_uti.copy()
-dataset_uti.loc[:, 'morte_na_uti'] = dataset_uti['subject_id'].isin(mortalidade_intra_uti['subject_id']).astype(int)
-dataset_uti.loc[:, 'morte_hospitalar'] = dataset_uti['subject_id'].isin(mortalidade_hospitalar['subject_id']).astype(int)
-dataset_uti.loc[:, 'morte_1ano'] = dataset_uti['subject_id'].isin(mortalidade_1_ano['subject_id']).astype(int)
-
-# 📌 Criar coluna de mortalidade total
+# 📌 Flags de mortalidade e target
+dataset_uti['morte_na_uti'] = dataset_uti['subject_id'].isin(mortalidade_intra_uti['subject_id']).astype(int)
+dataset_uti['morte_hospitalar'] = dataset_uti['subject_id'].isin(mortalidade_hospitalar['subject_id']).astype(int)
+dataset_uti['morte_1ano'] = dataset_uti['subject_id'].isin(mortalidade_1_ano['subject_id']).astype(int)
 dataset_uti['mortalidade_total'] = (
     (dataset_uti['morte_na_uti'] + dataset_uti['morte_hospitalar'] + dataset_uti['morte_1ano']) > 0
 ).astype(int)
+dataset_uti['target'] = dataset_uti['mortalidade_total']
 
-# 📌 Unir variáveis
+# 📌 Variáveis adicionais
 dataset_uti = dataset_uti.merge(num_admissoes_uti, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(total_icu_los, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(num_diagnosticos, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(tempo_antes_uti, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(exames_variancia, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(exames_first_last, on='subject_id', how='left')
-dataset_uti = dataset_uti.merge(diagnosticos_alto_risco, on='subject_id', how='left').fillna({'num_diagnosticos_alto_risco': 0})
 dataset_uti = dataset_uti.merge(num_procedimentos, on='subject_id', how='left')
 dataset_uti = dataset_uti.merge(pacientes_ventilacao, on='subject_id', how='left').fillna({'ventilacao': 0})
 dataset_uti = dataset_uti.merge(pacientes_vasopressores, on='subject_id', how='left').fillna({'vasopressor': 0})
 dataset_uti = dataset_uti.merge(pacientes_tsr, on='subject_id', how='left').fillna({'TSR': 0})
 
-# 📌 Remover duplicatas e manter 100 pacientes
-dataset_uti = dataset_uti.drop_duplicates(subset=['subject_id']).sort_values(by='subject_id').head(100)
+dataset_uti[['ventilacao', 'vasopressor', 'TSR']] = dataset_uti[['ventilacao', 'vasopressor', 'TSR']].astype(int)
 
-# 📌 Salvar
-dataset_uti.to_csv("dataset_UTI_completo.csv", index=False)
-print("✅ Dataset salvo como 'dataset_UTI_completo.csv'")
+# 📌 Internações, admissões e exames
+admissions_df['duracao_internacao'] = (admissions_df['dischtime'] - admissions_df['admittime']).dt.total_seconds() / (24 * 3600)
+duracao_internacao = admissions_df.groupby('subject_id')['duracao_internacao'].max().reset_index()
+num_admissoes_hospital = admissions_df.groupby('subject_id')['hadm_id'].nunique().reset_index(name='num_admissoes_hospital')
+num_exames_lab = labevents_df.groupby('subject_id')['itemid'].count().reset_index(name='num_exames_lab')
+
+dataset_uti = dataset_uti.merge(duracao_internacao, on='subject_id', how='left')
+dataset_uti = dataset_uti.merge(num_admissoes_hospital, on='subject_id', how='left')
+dataset_uti = dataset_uti.merge(num_exames_lab, on='subject_id', how='left')
+
+df_modelo = dataset_uti.drop(columns=['morte_na_uti', 'morte_hospitalar', 'morte_1ano', 'mortalidade_total'])
+df_modelo['gender'] = df_modelo['gender'].map({'M': 1, 'F': 0})
+
+# Novas variáveis derivadas
+df_modelo['razao_diagnosticos_admissoes'] = df_modelo['num_diagnosticos'] / (df_modelo['num_admissoes_hospital'] + 1)
+df_modelo['razao_uti_hosp'] = df_modelo['total_icu_los'] / (df_modelo['duracao_internacao'] + 1)
+
+for col in ['dif_exames']:
+    df_modelo[f'log_{col}'] = np.log1p(df_modelo[col])
+
+
+# Heart Rate e Respiratory Rate
+clinical_vars = chartevents_df[chartevents_df['itemid'].isin([220045, 220210])]
+clinical_vars = clinical_vars.pivot_table(index='subject_id', columns='itemid', values='valuenum', aggfunc='first').reset_index()
+clinical_vars.columns = ['subject_id', 'heart_rate', 'respiratory_rate']
+
+# Mesclar no dataset principal
+df_modelo = df_modelo.merge(clinical_vars, on='subject_id', how='left')
+
+# Lactato, Creatinina, Bilirrubina total
+lab_vars = labevents_df[labevents_df['itemid'].isin([50813, 50912, 50885])]
+lab_vars = lab_vars.pivot_table(index='subject_id', columns='itemid', values='valuenum', aggfunc='first').reset_index()
+lab_vars.columns = ['subject_id', 'lactate', 'creatinine', 'bilirubin_total']
+
+# Mesclar no dataset principal
+df_modelo = df_modelo.merge(lab_vars, on='subject_id', how='left')
+
+# Preencher valores faltantes com a mediana
+cols_imputar = ['heart_rate', 'respiratory_rate', 'lactate', 'creatinine', 'bilirubin_total']
+df_modelo[cols_imputar] = df_modelo[cols_imputar].fillna(df_modelo[cols_imputar].median())
+
+
+
+# Remover duplicidades com base em 'subject_id'
+df_modelo = df_modelo.drop_duplicates(subset=['subject_id'])
+
+df_modelo.to_csv("dataset_UTI.csv", index=False)
+print("✅ Dataset 'dataset_UTI.csv' salvo!")
