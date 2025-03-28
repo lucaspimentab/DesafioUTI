@@ -1,101 +1,84 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from imblearn.combine import SMOTEENN
 import shap
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split, cross_validate, StratifiedKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import classification_report, confusion_matrix
 import joblib
 
-dataset_uti = pd.read_csv("dataset_UTI_completo.csv")
+# Carregar dataset tratado
+df = pd.read_csv("dataset_UTI.csv")
 
-# Converter 'gender' para numérico
-label_encoder = LabelEncoder()
-dataset_uti['gender'] = label_encoder.fit_transform(dataset_uti['gender'])
+# Separar variáveis independentes e dependente
+X = df.drop(columns=['subject_id', 'target'])
+y = df['target']
 
-# Agrupar medições por paciente
-dataset_uti_static = dataset_uti.groupby('subject_id').mean().reset_index()
+# Divisão treino/teste
+X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.3, random_state=42)
 
-# Definir variável-alvo e features
-y = dataset_uti_static['mortalidade_intra_uti']
-X = dataset_uti_static.drop(columns=['subject_id', 'mortalidade_intra_uti'])
+# Pipeline do modelo otimizado
+logistic_model = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', StandardScaler()),
+    ('logistic', LogisticRegression(
+        C=0.1, 
+        class_weight='balanced', 
+        penalty='l2', 
+        solver='liblinear', 
+        random_state=42))
+])
 
-# Preencher valores ausentes com a média
-X.fillna(X.mean(), inplace=True)
+# Validação cruzada
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores = cross_validate(logistic_model, X, y, cv=cv, scoring=['precision', 'recall', 'f1', 'accuracy'])
 
-# Normalização dos dados
-scaler = StandardScaler()
-X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+print("\n📌 Resultados da Validação Cruzada:")
+for metric in ['test_precision', 'test_recall', 'test_f1', 'test_accuracy']:
+    print(f"{metric[5:].capitalize()}: {np.mean(scores[metric]):.3f}")
 
-# Divisão treino-teste
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y, test_size=0.3, random_state=42, stratify=y
-)
+# Treinamento final
+logistic_model.fit(X_train, y_train)
 
-# Aplicar SMOTEENN para balanceamento dos dados
-smote_enn = SMOTEENN(random_state=42)
-X_resampled, y_resampled = smote_enn.fit_resample(X_train, y_train)
+# Avaliação no teste
+print("\n📌 Avaliação Final no Teste:")
+y_pred = logistic_model.predict(X_test)
+print(classification_report(y_test, y_pred))
+print(confusion_matrix(y_test, y_pred))
 
-# Definir e treinar modelo Random Forest otimizado
-rf_optimized = RandomForestClassifier(
-    bootstrap=False,
-    max_depth=None,
-    min_samples_leaf=1,
-    min_samples_split=5,
-    n_estimators=100,
-    class_weight='balanced',
-    random_state=42
-)
-
-# Avaliação com validação cruzada
-cv_scores = cross_val_score(rf_optimized, X_resampled, y_resampled, cv=5, scoring='f1')
-print(f"\nMédia do F1-score na Validação Cruzada: {np.mean(cv_scores):.4f}")
-
-# Treinar modelo final
-rf_optimized.fit(X_resampled, y_resampled)
-
-# Fazer previsões no conjunto de teste
-y_pred_final = rf_optimized.predict(X_test)
-
-# Relatório de desempenho do modelo
-print("\nRelatório de Classificação:")
-print(classification_report(y_test, y_pred_final))
-
-# Matriz de confusão
-print("\nMatriz de Confusão:")
-print(confusion_matrix(y_test, y_pred_final))
-
-# Salvar modelo treinado
-joblib.dump(rf_optimized, "modelo_rf_uti_otimizado_final.pkl")
+# Salvar o modelo
+joblib.dump(logistic_model, "modelo_logistico_otimizado.pkl")
+print("✅ Modelo Logístico salvo como 'modelo_logistico_otimizado.pkl'")
 
 # Explicabilidade com SHAP
-print("\nGerando análise SHAP...")
-explainer = shap.TreeExplainer(rf_optimized)
-shap_values = explainer.shap_values(X_test)
-X_test_df = pd.DataFrame(X_test, columns=X.columns)
+# Aplicar transformação completa dos dados
+X_train_transformed = logistic_model.named_steps['scaler'].transform(
+    logistic_model.named_steps['imputer'].transform(X_train)
+)
+X_test_transformed = logistic_model.named_steps['scaler'].transform(
+    logistic_model.named_steps['imputer'].transform(X_test)
+)
+X_test_transformed = pd.DataFrame(X_test_transformed, columns=X_test.columns)
 
-if isinstance(shap_values, list):
-    shap_values_correct = np.array(shap_values[1])
-else:
-    shap_values_correct = np.array(shap_values)
+# SHAP explainer e valores
+explainer = shap.LinearExplainer(logistic_model.named_steps['logistic'], X_train_transformed)
+shap_values = explainer(X_test_transformed)
 
-if len(shap_values_correct.shape) == 3:
-    shap_values_correct = shap_values_correct.sum(axis=2)
-
-impacto_medio = np.mean(np.abs(shap_values_correct), axis=0)
-shap_df = pd.DataFrame({
-    'variavel': X_test_df.columns,
-    'impacto_medio': impacto_medio
-})
-
-shap_df = shap_df.sort_values(by='impacto_medio', ascending=False)
-print("\nVariáveis ordenadas por impacto médio no modelo:")
-print(shap_df)
-
-# Gerar e salvar gráfico SHAP
-shap.summary_plot(shap_values_correct, X_test_df, show=False)
+# Plot
+shap.summary_plot(shap_values, X_test, show=False)
 plt.tight_layout()
-plt.savefig("grafico_shap.png", dpi=300)
-plt.close()
+plt.savefig("shap_logistic_importancia.png", dpi=300)
+print("📈 Gráfico SHAP salvo como 'shap_logistic_importancia.png'")
+
+# Importância média
+importances = np.abs(shap_values.values).mean(axis=0)
+feature_importance = pd.DataFrame({
+    'Variável': X_test.columns,
+    'Importância Média (SHAP)': importances
+}).sort_values(by='Importância Média (SHAP)', ascending=False)
+
+print("\n📊 Importância das Variáveis (SHAP):")
+print(feature_importance.to_string(index=False))
